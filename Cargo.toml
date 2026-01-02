@@ -1,0 +1,9 @@
+[package]
+name = "renewal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+hostname = "0.4"
+clap = { version = "4.4", features = ["derive"] }
