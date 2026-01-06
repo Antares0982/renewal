@@ -156,14 +156,14 @@ fn do_nixos_rebuild_switch(
     native_hostname: &str,
 ) -> anyhow::Result<()> {
     if let Some(r) = remote {
-        // Remote rebuild: do not use sudo, use --target-host and --use-remote-sudo
+        // Remote rebuild: do not use sudo, use --target-host and --sudo
         let mut cmd = Command::new("nixos-rebuild");
         cmd.arg("switch")
             .arg("--flake")
             .arg(format!(".#{}", r.remote_name))
             .arg("--target-host")
             .arg(&r.target_host)
-            .arg("--use-remote-sudo");
+            .arg("--sudo");
         let status = run_in_dir(&mut cmd, dir)?;
         if !status.success() {
             return Err(anyhow::anyhow!("nixos-rebuild (remote) failed: {}", status));
