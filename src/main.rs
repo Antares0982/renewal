@@ -22,6 +22,14 @@ struct Cli {
     /// Remote in format `target_host:remote_name`
     #[arg(long = "remote")]
     remote: Option<Remote>,
+
+    /// Git branch to checkout (default: master)
+    #[arg(long = "branch", default_value = "master")]
+    branch: String,
+
+    /// Skip `git pull` after checkout
+    #[arg(long = "no-pull")]
+    no_pull: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,8 +67,8 @@ fn run() -> anyhow::Result<()> {
     let nix_dot = env::var("NIX_DOT_FILES").unwrap_or_else(|_| String::from("."));
     let workdir = Path::new(&nix_dot);
 
-    // Always perform git checkout master && git pull in the NIX_DOT_FILES dir (like the original script).
-    do_git_checkout_pull(workdir)?;
+    // Checkout the specified branch and optionally pull latest changes.
+    do_git_checkout_pull(workdir, &cli.branch, cli.no_pull)?;
 
     if cli.update {
         do_flake_update(workdir)?;
@@ -91,12 +99,16 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs a command in the given directory and returns its exit status.
+/// The command's stdout and stderr are inherited from the current process.
 fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
     cmd.current_dir(dir);
     let status = cmd.status()?;
     Ok(status)
 }
 
+/// Runs a command in the given directory with stdout/stderr redirected to /dev/null.
+/// Used for operations whose output we intentionally suppress (e.g. flake update).
 fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
     use std::fs::File;
     // Redirect stdout/stderr to /dev/null to mimic original script
@@ -108,22 +120,26 @@ fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatu
     Ok(status)
 }
 
-fn do_git_checkout_pull(dir: &Path) -> anyhow::Result<()> {
+/// Checks out the given `branch` in `dir`, then runs `git pull` unless `no_pull` is true.
+fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Result<()> {
     let mut git_co = Command::new("git");
-    git_co.arg("checkout").arg("master");
+    git_co.arg("checkout").arg(branch);
     let status = run_in_dir(&mut git_co, dir)?;
     if !status.success() {
         return Err(anyhow::anyhow!("git checkout failed: {}", status));
     }
-    let mut git_pull = Command::new("git");
-    git_pull.arg("pull");
-    let status = run_in_dir(&mut git_pull, dir)?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("git pull failed: {}", status));
+    if !no_pull {
+        let mut git_pull = Command::new("git");
+        git_pull.arg("pull");
+        let status = run_in_dir(&mut git_pull, dir)?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("git pull failed: {}", status));
+        }
     }
     Ok(())
 }
 
+/// Runs `nix flake update --commit-lock-file` in `dir`, suppressing its output.
 fn do_flake_update(dir: &Path) -> anyhow::Result<()> {
     println!("{}Updating flakes...{}", BLUE, NORMAL);
     let mut cmd = Command::new("nix");
@@ -135,6 +151,8 @@ fn do_flake_update(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs `nix build -L .#nixosConfigurations.<hostname>.config.system.build.toplevel --show-trace`
+/// in `dir`.
 fn do_nix_build(dir: &Path, hostname: &str) -> anyhow::Result<()> {
     let target = format!(
         ".#nixosConfigurations.{}.config.system.build.toplevel",
@@ -150,6 +168,9 @@ fn do_nix_build(dir: &Path, hostname: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs `nixos-rebuild switch` in `dir`.
+/// - For remote targets: uses `--target-host` and `--sudo` (no local sudo).
+/// - For local targets: prepends `sudo`.
 fn do_nixos_rebuild_switch(
     dir: &Path,
     remote: Option<&Remote>,

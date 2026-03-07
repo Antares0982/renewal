@@ -4,10 +4,12 @@ Wraps some frequently used nixos-rebuild commands.
 
 ## Features
 
-- `-u, --update` — update flakes (runs `git checkout master`, `git pull` and `nix flake update --commit-lock-file`) before building.
+- `-u, --update` — update flakes (runs `git checkout <branch>`, `git pull` and `nix flake update --commit-lock-file`) before building.
 - `-b, --build-only` — perform `nix build` only and do not run `nixos-rebuild switch`.
 - `--remote target_host:remote_name` — use `remote_name` as the profile name and run a remote rebuild with:
 	`nixos-rebuild switch --flake .#<remote_name> --target-host <target_host> --use-remote-sudo` (no `sudo` locally).
+- `--branch <branch>` — git branch to checkout before building (default: `master`).
+- `--no-pull` — skip the `git pull` step after checkout.
 
 When no flags are given the tool will:
 
@@ -20,9 +22,12 @@ When no flags are given the tool will:
 Build and run from the repository root:
 
 ```bash
-cargo run -- --update
-cargo run -- --build-only
-cargo run -- --remote myhost:remoteName
+renewal --update
+renewal --build-only
+renewal --remote myhost:remoteName
+renewal --branch develop
+renewal --no-pull
+renewal --branch develop --no-pull
 ```
 
 Or build a release binary and install it into your PATH.
