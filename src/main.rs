@@ -276,8 +276,9 @@ fn do_nixos_rebuild_switch(
 
 #[cfg(target_os = "macos")]
 fn do_darwin_rebuild_switch(dir: &Path, hostname: &str) -> anyhow::Result<()> {
-    let mut cmd = Command::new("darwin-rebuild");
-    cmd.arg("switch")
+    let mut cmd = Command::new("sudo");
+    cmd.arg("darwin-rebuild")
+        .arg("switch")
         .arg("--flake")
         .arg(format!(".#{}", hostname));
     let status = run_in_dir(&mut cmd, dir)?;
