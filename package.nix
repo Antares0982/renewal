@@ -11,5 +11,5 @@ rustPlatform.buildRustPackage rec {
     name = pname;
     path = ./.;
   };
-  cargoHash = "sha256-T55ece63jUDZQBS70CcjcjHYFrKJqxkVMEahYBVv/Co=";
+  cargoHash = "sha256-xxzczvHiBQ/NFaFeSJKzCBDDet2flkviwpePId+nb20=";
 }

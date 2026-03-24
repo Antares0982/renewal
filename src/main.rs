@@ -3,7 +3,6 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use clap::Parser;
-use std::str::FromStr;
 
 const BLUE: &str = "\x1b[34m";
 const NORMAL: &str = "\x1b[0m";
@@ -15,11 +14,12 @@ struct Cli {
     #[arg(short = 'u', long = "update")]
     update: bool,
 
-    /// Build only; do not run `nixos-rebuild switch`
+    /// Build only; do not run rebuild switch
     #[arg(short = 'b', long = "build-only")]
     build_only: bool,
 
     /// Remote in format `target_host:remote_name`
+    #[cfg(target_os = "linux")]
     #[arg(long = "remote")]
     remote: Option<Remote>,
 
@@ -30,28 +30,42 @@ struct Cli {
     /// Skip `git pull` after checkout
     #[arg(long = "no-pull")]
     no_pull: bool,
+
+    /// Hostname to use for darwin-rebuild.
+    /// If omitted, auto-detected from darwinConfigurations in flake.
+    #[cfg(target_os = "macos")]
+    #[arg(long = "hostname")]
+    hostname: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct Remote {
-    target_host: String,
-    remote_name: String,
-}
+#[cfg(target_os = "linux")]
+mod remote {
+    use std::str::FromStr;
 
-impl FromStr for Remote {
-    type Err = String;
+    #[derive(Debug, Clone)]
+    pub struct Remote {
+        pub target_host: String,
+        pub remote_name: String,
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-            return Err("remote must be in format target_host:remote_name".into());
+    impl FromStr for Remote {
+        type Err = String;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let parts: Vec<&str> = s.splitn(2, ':').collect();
+            if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+                return Err("remote must be in format target_host:remote_name".into());
+            }
+            Ok(Remote {
+                target_host: parts[0].to_string(),
+                remote_name: parts[1].to_string(),
+            })
         }
-        Ok(Remote {
-            target_host: parts[0].to_string(),
-            remote_name: parts[1].to_string(),
-        })
     }
 }
+
+#[cfg(target_os = "linux")]
+use remote::Remote;
 
 fn main() {
     if let Err(e) = run() {
@@ -74,7 +88,17 @@ fn run() -> anyhow::Result<()> {
         do_flake_update(workdir)?;
     }
 
-    // get hostname once; if remote provided, use its remote_name as hostname
+    #[cfg(target_os = "linux")]
+    run_nixos(workdir, &cli)?;
+
+    #[cfg(target_os = "macos")]
+    run_darwin(workdir, &cli)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     let native_hostname = hostname::get()?.to_string_lossy().into_owned();
     let effective_name = if let Some(ref r) = cli.remote {
         r.remote_name.clone()
@@ -82,25 +106,80 @@ fn run() -> anyhow::Result<()> {
         native_hostname.clone()
     };
 
-    // perform build
     println!("{}Building...{}", BLUE, NORMAL);
-    do_nix_build(workdir, &effective_name)?;
+    do_nix_build(workdir, &effective_name, "nixosConfigurations")?;
 
     if cli.build_only {
-        // build-only: stop here
         return Ok(());
     }
 
-    // switch
     println!("{}Switching...{}", BLUE, NORMAL);
     do_nixos_rebuild_switch(workdir, cli.remote.as_ref(), &native_hostname)?;
 
-    // If neither flag matched (or after processing), exit normally.
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
+    let hostname = match &cli.hostname {
+        Some(h) => h.clone(),
+        None => resolve_darwin_hostname(workdir)?,
+    };
+
+    println!("{}Building...{}", BLUE, NORMAL);
+    do_nix_build(workdir, &hostname, "darwinConfigurations")?;
+
+    if cli.build_only {
+        return Ok(());
+    }
+
+    println!("{}Switching...{}", BLUE, NORMAL);
+    do_darwin_rebuild_switch(workdir, &hostname)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_darwin_hostname(dir: &Path) -> anyhow::Result<String> {
+    let output = Command::new("nix")
+        .arg("eval")
+        .arg(".#darwinConfigurations")
+        .arg("--apply")
+        .arg("x: builtins.attrNames x")
+        .arg("--json")
+        .current_dir(dir)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "failed to evaluate darwinConfigurations from flake: {}",
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let names: Vec<String> = serde_json::from_str(&stdout)?;
+
+    match names.len() {
+        0 => Err(anyhow::anyhow!(
+            "no darwinConfigurations found in flake. Please specify --hostname."
+        )),
+        1 => {
+            println!(
+                "{}Auto-detected darwinConfiguration: {}{}",
+                BLUE, names[0], NORMAL
+            );
+            Ok(names[0].clone())
+        }
+        _ => Err(anyhow::anyhow!(
+            "multiple darwinConfigurations found: {}. Please specify --hostname.",
+            names.join(", ")
+        )),
+    }
+}
+
 /// Runs a command in the given directory and returns its exit status.
-/// The command's stdout and stderr are inherited from the current process.
 fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
     cmd.current_dir(dir);
     let status = cmd.status()?;
@@ -108,10 +187,8 @@ fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
 }
 
 /// Runs a command in the given directory with stdout/stderr redirected to /dev/null.
-/// Used for operations whose output we intentionally suppress (e.g. flake update).
 fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
     use std::fs::File;
-    // Redirect stdout/stderr to /dev/null to mimic original script
     let devnull = File::open("/dev/null")?;
     cmd.current_dir(dir)
         .stdout(devnull.try_clone()?)
@@ -120,7 +197,6 @@ fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatu
     Ok(status)
 }
 
-/// Checks out the given `branch` in `dir`, then runs `git pull` unless `no_pull` is true.
 fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Result<()> {
     let mut git_co = Command::new("git");
     git_co.arg("checkout").arg(branch);
@@ -139,7 +215,6 @@ fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Resu
     Ok(())
 }
 
-/// Runs `nix flake update --commit-lock-file` in `dir`, suppressing its output.
 fn do_flake_update(dir: &Path) -> anyhow::Result<()> {
     println!("{}Updating flakes...{}", BLUE, NORMAL);
     let mut cmd = Command::new("nix");
@@ -151,12 +226,10 @@ fn do_flake_update(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs `nix build -L .#nixosConfigurations.<hostname>.config.system.build.toplevel --show-trace`
-/// in `dir`.
-fn do_nix_build(dir: &Path, hostname: &str) -> anyhow::Result<()> {
+fn do_nix_build(dir: &Path, hostname: &str, config_attr: &str) -> anyhow::Result<()> {
     let target = format!(
-        ".#nixosConfigurations.{}.config.system.build.toplevel",
-        hostname
+        ".#{}.{}.config.system.build.toplevel",
+        config_attr, hostname
     );
     let mut cmd = Command::new("nix");
     cmd.arg("build").arg("-L").arg(&target).arg("--show-trace");
@@ -168,16 +241,13 @@ fn do_nix_build(dir: &Path, hostname: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs `nixos-rebuild switch` in `dir`.
-/// - For remote targets: uses `--target-host` and `--sudo` (no local sudo).
-/// - For local targets: prepends `sudo`.
+#[cfg(target_os = "linux")]
 fn do_nixos_rebuild_switch(
     dir: &Path,
     remote: Option<&Remote>,
     native_hostname: &str,
 ) -> anyhow::Result<()> {
     if let Some(r) = remote {
-        // Remote rebuild: do not use sudo, use --target-host and --sudo
         let mut cmd = Command::new("nixos-rebuild");
         cmd.arg("switch")
             .arg("--flake")
@@ -200,6 +270,19 @@ fn do_nixos_rebuild_switch(
         if !status.success() {
             return Err(anyhow::anyhow!("nixos-rebuild failed: {}", status));
         }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn do_darwin_rebuild_switch(dir: &Path, hostname: &str) -> anyhow::Result<()> {
+    let mut cmd = Command::new("darwin-rebuild");
+    cmd.arg("switch")
+        .arg("--flake")
+        .arg(format!(".#{}", hostname));
+    let status = run_in_dir(&mut cmd, dir)?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("darwin-rebuild failed: {}", status));
     }
     Ok(())
 }
