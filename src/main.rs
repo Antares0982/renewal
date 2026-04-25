@@ -205,11 +205,20 @@ fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Resu
         return Err(anyhow::anyhow!("git checkout failed: {}", status));
     }
     if !no_pull {
-        let mut git_pull = Command::new("git");
-        git_pull.arg("pull");
-        let status = run_in_dir(&mut git_pull, dir)?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("git pull failed: {}", status));
+        let mut git_upstream = Command::new("git");
+        git_upstream
+            .arg("rev-parse")
+            .arg("--abbrev-ref")
+            .arg("--symbolic-full-name")
+            .arg("@{u}");
+        let has_upstream = run_in_dir_capture(&mut git_upstream, dir)?.success();
+        if has_upstream {
+            let mut git_pull = Command::new("git");
+            git_pull.arg("pull");
+            let status = run_in_dir(&mut git_pull, dir)?;
+            if !status.success() {
+                return Err(anyhow::anyhow!("git pull failed: {}", status));
+            }
         }
     }
     Ok(())
