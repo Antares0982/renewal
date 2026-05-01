@@ -81,6 +81,11 @@ fn run() -> anyhow::Result<()> {
     let nix_dot = env::var("NIX_DOT_FILES").unwrap_or_else(|_| String::from("."));
     let workdir = Path::new(&nix_dot);
 
+    // Require a clean working tree before any operations when we will switch.
+    if !cli.build_only {
+        check_git_clean(workdir)?;
+    }
+
     // Checkout the specified branch and optionally pull latest changes.
     do_git_checkout_pull(workdir, &cli.branch, cli.no_pull)?;
 
@@ -116,6 +121,8 @@ fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     println!("{}Switching...{}", BLUE, NORMAL);
     do_nixos_rebuild_switch(workdir, cli.remote.as_ref(), &native_hostname)?;
 
+    do_git_tag_and_push(workdir, &effective_name)?;
+
     Ok(())
 }
 
@@ -135,6 +142,8 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
 
     println!("{}Switching...{}", BLUE, NORMAL);
     do_darwin_rebuild_switch(workdir, &hostname)?;
+
+    do_git_tag_and_push(workdir, &hostname)?;
 
     Ok(())
 }
@@ -294,5 +303,55 @@ fn do_darwin_rebuild_switch(dir: &Path, hostname: &str) -> anyhow::Result<()> {
     if !status.success() {
         return Err(anyhow::anyhow!("darwin-rebuild failed: {}", status));
     }
+    Ok(())
+}
+
+fn check_git_clean(dir: &Path) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(dir)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("git status check failed"));
+    }
+    if !output.stdout.is_empty() {
+        let dirty = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow::anyhow!(
+            "Nix config repository is not clean:\n{}\nCommit or stash all changes before switching.",
+            dirty.trim()
+        ));
+    }
+    Ok(())
+}
+
+fn do_git_tag_and_push(dir: &Path, config_name: &str) -> anyhow::Result<()> {
+    let date_out = Command::new("date").arg("+%Y-%m-%d-%H-%M").output()?;
+    if !date_out.status.success() {
+        return Err(anyhow::anyhow!("failed to get current date/time"));
+    }
+    let timestamp = String::from_utf8(date_out.stdout)?.trim().to_string();
+    let tag = format!("{}-{}", config_name, timestamp);
+
+    let status = Command::new("git")
+        .arg("tag")
+        .arg(&tag)
+        .current_dir(dir)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("git tag failed: {}", status));
+    }
+
+    let status = Command::new("git")
+        .arg("push")
+        .arg("origin")
+        .arg(&tag)
+        .current_dir(dir)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("git push tag failed: {}", status));
+    }
+
+    println!("{}Tagged and pushed: {}{}",  BLUE, tag, NORMAL);
     Ok(())
 }
