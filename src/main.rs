@@ -197,12 +197,12 @@ fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
 
 /// Runs a command in the given directory with stdout/stderr redirected to /dev/null.
 fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
-    use std::fs::File;
-    let devnull = File::open("/dev/null")?;
-    cmd.current_dir(dir)
-        .stdout(devnull.try_clone()?)
-        .stderr(devnull);
-    let status = cmd.status()?;
+    use std::process::Stdio;
+    let status = cmd
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
     Ok(status)
 }
 
