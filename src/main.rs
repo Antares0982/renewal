@@ -5,6 +5,7 @@ use std::process::{Command, ExitStatus};
 use clap::Parser;
 
 const BLUE: &str = "\x1b[34m";
+const ORANGE: &str = "\x1b[38;5;208m";
 const NORMAL: &str = "\x1b[0m";
 
 #[derive(Parser)]
@@ -207,11 +208,27 @@ fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatu
 }
 
 fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Result<()> {
+    let prev_branch = Command::new("git")
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .current_dir(dir)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
     let mut git_co = Command::new("git");
     git_co.arg("checkout").arg(branch);
-    let status = run_in_dir(&mut git_co, dir)?;
+    let status = run_in_dir_capture(&mut git_co, dir)?;
     if !status.success() {
         return Err(anyhow::anyhow!("git checkout failed: {}", status));
+    }
+
+    if prev_branch != branch {
+        eprintln!(
+            "{}⚠ Warning: switched from branch '{}' to '{}'{}",
+            ORANGE, prev_branch, branch, NORMAL
+        );
     }
     if !no_pull {
         let mut git_upstream = Command::new("git");
@@ -352,6 +369,6 @@ fn do_git_tag_and_push(dir: &Path, config_name: &str) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("git push tag failed: {}", status));
     }
 
-    println!("{}Tagged and pushed: {}{}",  BLUE, tag, NORMAL);
+    println!("{}Tagged and pushed: {}{}", BLUE, tag, NORMAL);
     Ok(())
 }
