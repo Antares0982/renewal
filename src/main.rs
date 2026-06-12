@@ -37,6 +37,10 @@ struct Cli {
     #[cfg(target_os = "macos")]
     #[arg(long = "hostname")]
     hostname: Option<String>,
+
+    /// Skip git tag and push after switching
+    #[arg(long = "no-tag")]
+    no_tag: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -122,7 +126,9 @@ fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     println!("{}Switching...{}", BLUE, NORMAL);
     do_nixos_rebuild_switch(workdir, cli.remote.as_ref(), &native_hostname)?;
 
-    do_git_tag_and_push(workdir, &effective_name)?;
+    if !cli.no_tag {
+        do_git_tag_and_push(workdir, &effective_name)?;
+    }
 
     Ok(())
 }
@@ -144,7 +150,9 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     println!("{}Switching...{}", BLUE, NORMAL);
     do_darwin_rebuild_switch(workdir, &hostname)?;
 
-    do_git_tag_and_push(workdir, &hostname)?;
+    if !cli.no_tag {
+        do_git_tag_and_push(workdir, &hostname)?;
+    }
 
     Ok(())
 }
