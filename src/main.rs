@@ -32,8 +32,9 @@ struct Cli {
     #[arg(long = "no-pull")]
     no_pull: bool,
 
-    /// Hostname to use for darwin-rebuild.
-    /// If omitted, auto-detected from darwinConfigurations in flake.
+    /// Host to build for darwin-rebuild; selects the `hosts/<name>` flake.
+    /// If omitted, auto-detected by scanning `hosts/*` for the flake exposing
+    /// darwinConfigurations.
     #[cfg(target_os = "macos")]
     #[arg(long = "hostname")]
     hostname: Option<String>,
@@ -94,10 +95,6 @@ fn run() -> anyhow::Result<()> {
     // Checkout the specified branch and optionally pull latest changes.
     do_git_checkout_pull(workdir, &cli.branch, cli.no_pull)?;
 
-    if cli.update {
-        do_flake_update(workdir)?;
-    }
-
     #[cfg(target_os = "linux")]
     run_nixos(workdir, &cli)?;
 
@@ -115,6 +112,10 @@ fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     } else {
         native_hostname.clone()
     };
+
+    if cli.update {
+        do_flake_update(&host_dir(workdir, &effective_name))?;
+    }
 
     println!("{}Building...{}", BLUE, NORMAL);
     do_nix_build(workdir, &effective_name, "nixosConfigurations")?;
@@ -140,6 +141,10 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
         None => resolve_darwin_hostname(workdir)?,
     };
 
+    if cli.update {
+        do_flake_update(&host_dir(workdir, &hostname))?;
+    }
+
     println!("{}Building...{}", BLUE, NORMAL);
     do_nix_build(workdir, &hostname, "darwinConfigurations")?;
 
@@ -157,42 +162,55 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Scans `<dir>/hosts/*` for the flake that exposes a non-empty
+/// `darwinConfigurations`, returning that directory name (== config name).
 #[cfg(target_os = "macos")]
 fn resolve_darwin_hostname(dir: &Path) -> anyhow::Result<String> {
-    let output = Command::new("nix")
-        .arg("eval")
-        .arg(".#darwinConfigurations")
-        .arg("--apply")
-        .arg("x: builtins.attrNames x")
-        .arg("--json")
-        .current_dir(dir)
-        .output()?;
+    let hosts_dir = dir.join("hosts");
+    let mut found: Vec<String> = Vec::new();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "failed to evaluate darwinConfigurations from flake: {}",
-            stderr.trim()
-        ));
+    for entry in std::fs::read_dir(&hosts_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !hosts_dir.join(&name).join("flake.nix").exists() {
+            continue;
+        }
+
+        let output = Command::new("nix")
+            .arg("eval")
+            .arg(host_flake_ref(&name, "darwinConfigurations"))
+            .arg("--apply")
+            .arg("x: builtins.attrNames x")
+            .arg("--json")
+            .current_dir(dir)
+            .output()?;
+
+        if !output.status.success() {
+            // Host flake without darwinConfigurations: skip.
+            continue;
+        }
+
+        let stdout = String::from_utf8(output.stdout)?;
+        let names: Vec<String> = serde_json::from_str(&stdout)?;
+        if !names.is_empty() {
+            found.push(name);
+        }
     }
 
-    let stdout = String::from_utf8(output.stdout)?;
-    let names: Vec<String> = serde_json::from_str(&stdout)?;
-
-    match names.len() {
+    match found.len() {
         0 => Err(anyhow::anyhow!(
-            "no darwinConfigurations found in flake. Please specify --hostname."
+            "no darwinConfigurations found under hosts/*. Please specify --hostname."
         )),
         1 => {
-            println!(
-                "{}Auto-detected darwinConfiguration: {}{}",
-                BLUE, names[0], NORMAL
-            );
-            Ok(names[0].clone())
+            println!("{}Auto-detected darwin host: {}{}", BLUE, found[0], NORMAL);
+            Ok(found[0].clone())
         }
         _ => Err(anyhow::anyhow!(
-            "multiple darwinConfigurations found: {}. Please specify --hostname.",
-            names.join(", ")
+            "multiple darwin hosts found: {}. Please specify --hostname.",
+            found.join(", ")
         )),
     }
 }
@@ -258,22 +276,33 @@ fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Resu
     Ok(())
 }
 
-fn do_flake_update(dir: &Path) -> anyhow::Result<()> {
+/// Directory of the per-host flake at `<workdir>/hosts/<name>`.
+fn host_dir(workdir: &Path, name: &str) -> std::path::PathBuf {
+    workdir.join("hosts").join(name)
+}
+
+/// Flake reference into a per-host flake at `./hosts/<name>`.
+/// Process cwd stays at the repo root, so the relative path resolves there and
+/// git operations remain unaffected.
+fn host_flake_ref(name: &str, attr: &str) -> String {
+    format!("./hosts/{name}#{attr}")
+}
+
+/// Updates only the given host flake's lock file. The `--commit-lock-file`
+/// commit still lands in the single repo at the root.
+fn do_flake_update(host_dir: &Path) -> anyhow::Result<()> {
     println!("{}Updating flakes...{}", BLUE, NORMAL);
     let mut cmd = Command::new("nix");
     cmd.arg("flake").arg("update").arg("--commit-lock-file");
-    let status = run_in_dir_capture(&mut cmd, dir)?;
+    let status = run_in_dir_capture(&mut cmd, host_dir)?;
     if !status.success() {
         return Err(anyhow::anyhow!("nix flake update failed: {}", status));
     }
     Ok(())
 }
 
-fn do_nix_build(dir: &Path, hostname: &str, config_attr: &str) -> anyhow::Result<()> {
-    let target = format!(
-        ".#{}.{}.config.system.build.toplevel",
-        config_attr, hostname
-    );
+fn do_nix_build(dir: &Path, name: &str, config_attr: &str) -> anyhow::Result<()> {
+    let target = format!("./hosts/{name}#{config_attr}.{name}.config.system.build.toplevel");
     let mut cmd = Command::new("nix");
     cmd.arg("build").arg("-L").arg(&target).arg("--show-trace");
     let status = run_in_dir(&mut cmd, dir)?;
@@ -294,7 +323,7 @@ fn do_nixos_rebuild_switch(
         let mut cmd = Command::new("nixos-rebuild");
         cmd.arg("switch")
             .arg("--flake")
-            .arg(format!(".#{}", r.remote_name))
+            .arg(host_flake_ref(&r.remote_name, &r.remote_name))
             .arg("--target-host")
             .arg(&r.target_host)
             .arg("--sudo");
@@ -308,7 +337,7 @@ fn do_nixos_rebuild_switch(
             .arg("nixos-rebuild")
             .arg("switch")
             .arg("--flake")
-            .arg(format!(".#{}", native_hostname));
+            .arg(host_flake_ref(native_hostname, native_hostname));
         let status = run_in_dir(&mut sudo_cmd, dir)?;
         if !status.success() {
             return Err(anyhow::anyhow!("nixos-rebuild failed: {}", status));
@@ -323,7 +352,7 @@ fn do_darwin_rebuild_switch(dir: &Path, hostname: &str) -> anyhow::Result<()> {
     cmd.arg("darwin-rebuild")
         .arg("switch")
         .arg("--flake")
-        .arg(format!(".#{}", hostname));
+        .arg(host_flake_ref(hostname, hostname));
     let status = run_in_dir(&mut cmd, dir)?;
     if !status.success() {
         return Err(anyhow::anyhow!("darwin-rebuild failed: {}", status));
