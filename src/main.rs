@@ -117,6 +117,7 @@ fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
         do_flake_update(&host_dir(workdir, &effective_name))?;
     }
 
+    println!("{}Host: {}{}", BLUE, effective_name, NORMAL);
     println!("{}Building...{}", BLUE, NORMAL);
     do_nix_build(workdir, &effective_name, "nixosConfigurations")?;
 
