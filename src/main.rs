@@ -397,6 +397,8 @@ fn do_git_tag_and_push(dir: &Path, config_name: &str) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("git tag failed: {}", status));
     }
 
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
     let status = Command::new("git")
         .arg("push")
         .arg("origin")
