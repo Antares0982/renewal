@@ -19,7 +19,7 @@ struct Cli {
     #[arg(short = 'b', long = "build-only")]
     build_only: bool,
 
-    /// Remote in format `target_host:remote_name`
+    /// Remote as `target_host:remote_name` or `name`
     #[cfg(target_os = "linux")]
     #[arg(long = "remote")]
     remote: Option<Remote>,
@@ -58,14 +58,34 @@ mod remote {
         type Err = String;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
-            let parts: Vec<&str> = s.splitn(2, ':').collect();
-            if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-                return Err("remote must be in format target_host:remote_name".into());
+            let (target_host, remote_name) = s.split_once(':').unwrap_or((s, s));
+            if target_host.is_empty() || remote_name.is_empty() {
+                return Err("remote must be in format target_host:remote_name or name".into());
             }
             Ok(Remote {
-                target_host: parts[0].to_string(),
-                remote_name: parts[1].to_string(),
+                target_host: target_host.to_string(),
+                remote_name: remote_name.to_string(),
             })
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn parses_remote() {
+        use clap::Parser;
+
+        for (input, host, name) in [
+            ("gz", "gz", "gz"),
+            ("gz:gz", "gz", "gz"),
+            ("user@host:profile", "user@host", "profile"),
+        ] {
+            let cli = crate::Cli::try_parse_from(["renewal", "--remote", input]).unwrap();
+            let remote = cli.remote.unwrap();
+            assert_eq!(remote.target_host, host);
+            assert_eq!(remote.remote_name, name);
+        }
+        for input in ["", ":", "gz:", ":gz"] {
+            assert!(crate::Cli::try_parse_from(["renewal", "--remote", input]).is_err());
         }
     }
 }

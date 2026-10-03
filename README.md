@@ -14,6 +14,7 @@ target `./hosts/<name>`.
 - `-b, --build-only` — perform `nix build` only and do not run `nixos-rebuild switch`.
 - `--remote target_host:remote_name` — use `remote_name` as the profile name and run a remote rebuild with:
 	`nixos-rebuild switch --flake ./hosts/<remote_name>#<remote_name> --target-host <target_host> --sudo` (no `sudo` locally).
+  When no colon is given, both names use the same value: `--remote gz` is equivalent to `--remote gz:gz`.
 - `--branch <branch>` — git branch to checkout before building (default: `master`).
 - `--no-pull` — skip the `git pull` step after checkout.
 
@@ -31,6 +32,7 @@ Build and run from the repository root:
 renewal --update
 renewal --build-only
 renewal --remote myhost:remoteName
+renewal --remote gz
 renewal --branch develop
 renewal --no-pull
 renewal --branch develop --no-pull
