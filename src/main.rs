@@ -1,8 +1,10 @@
 use std::env;
-use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
-use clap::Parser;
+use anyhow::{Context, ensure};
+use clap::{CommandFactory, Parser};
 
 const BLUE: &str = "\x1b[34m";
 const ORANGE: &str = "\x1b[38;5;208m";
@@ -11,11 +13,15 @@ const NORMAL: &str = "\x1b[0m";
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Print shell completion script and exit
+    #[arg(long, value_parser = ["zsh"])]
+    completions: Option<String>,
+
     /// Update flakes before building
     #[arg(short = 'u', long = "update")]
     update: bool,
 
-    /// Build only; do not run rebuild switch
+    /// Build without switching
     #[arg(short = 'b', long = "build-only")]
     build_only: bool,
 
@@ -32,14 +38,12 @@ struct Cli {
     #[arg(long = "no-pull")]
     no_pull: bool,
 
-    /// Host to build for darwin-rebuild; selects the `hosts/<name>` flake.
-    /// If omitted, auto-detected by scanning `hosts/*` for the flake exposing
-    /// darwinConfigurations.
+    /// Host under hosts/; auto-detected if omitted
     #[cfg(target_os = "macos")]
     #[arg(long = "hostname")]
     hostname: Option<String>,
 
-    /// Skip git tag and push after switching
+    /// Skip tagging and pushing after switching
     #[arg(long = "no-tag")]
     no_tag: bool,
 }
@@ -95,7 +99,7 @@ use remote::Remote;
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e:#}");
         std::process::exit(1);
     }
 }
@@ -103,16 +107,24 @@ fn main() {
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Determine working directory from NIX_DOT_FILES env var, fallback to current dir
-    let nix_dot = env::var("NIX_DOT_FILES").unwrap_or_else(|_| String::from("."));
-    let workdir = Path::new(&nix_dot);
-
-    // Require a clean working tree before any operations when we will switch.
-    if !cli.build_only {
-        check_git_clean(workdir)?;
+    if cli.completions.is_some() {
+        let mut script = Vec::new();
+        clap_complete::generate(
+            clap_complete::shells::Zsh,
+            &mut Cli::command(),
+            "renewal",
+            &mut script,
+        );
+        std::io::stdout()
+            .write_all(&script)
+            .context("failed to write zsh completion script to stdout")?;
+        return Ok(());
     }
 
-    // Checkout the specified branch and optionally pull latest changes.
+    let workdir = repository_dir()?;
+    let workdir = workdir.as_path();
+    check_repository(workdir, !cli.build_only)?;
+
     do_git_checkout_pull(workdir, &cli.branch, cli.no_pull)?;
 
     #[cfg(target_os = "linux")]
@@ -124,14 +136,44 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn repository_dir() -> anyhow::Result<PathBuf> {
+    let (path, source) = match env::var_os("NIX_DOT_FILES") {
+        Some(value) => {
+            ensure!(
+                !value.is_empty(),
+                "NIX_DOT_FILES is empty; set it to your Nix configuration repository or unset it to use the current directory"
+            );
+            (PathBuf::from(value), "NIX_DOT_FILES")
+        }
+        None => (
+            PathBuf::from("."),
+            "current directory (NIX_DOT_FILES is unset)",
+        ),
+    };
+    let resolved = path.canonicalize().with_context(|| {
+        format!("cannot access repository directory {path:?} from {source}; check that the path exists and is accessible")
+    })?;
+    let metadata = std::fs::metadata(&resolved).with_context(|| {
+        format!("cannot inspect repository directory {resolved:?} from {source}")
+    })?;
+    ensure!(
+        metadata.is_dir(),
+        "repository path {resolved:?} from {source} is not a directory"
+    );
+    Ok(resolved)
+}
+
 #[cfg(target_os = "linux")]
 fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
-    let native_hostname = hostname::get()?.to_string_lossy().into_owned();
     let effective_name = if let Some(ref r) = cli.remote {
         r.remote_name.clone()
     } else {
-        native_hostname.clone()
+        hostname::get()
+            .context("failed to read the local hostname for selecting hosts/<name>")?
+            .into_string()
+            .map_err(|name| anyhow::anyhow!("local hostname {name:?} is not valid UTF-8"))?
     };
+    check_host(workdir, &effective_name)?;
 
     if cli.update {
         do_flake_update(&host_dir(workdir, &effective_name))?;
@@ -146,10 +188,11 @@ fn run_nixos(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     }
 
     println!("{}Switching...{}", BLUE, NORMAL);
-    do_nixos_rebuild_switch(workdir, cli.remote.as_ref(), &native_hostname)?;
+    do_nixos_rebuild_switch(workdir, cli.remote.as_ref(), &effective_name)?;
 
     if !cli.no_tag {
-        do_git_tag_and_push(workdir, &effective_name)?;
+        tag_and_push(workdir, &effective_name)
+            .context("system switch succeeded, but tagging or pushing the configuration failed")?;
     }
 
     Ok(())
@@ -161,6 +204,7 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
         Some(h) => h.clone(),
         None => resolve_darwin_hostname(workdir)?,
     };
+    check_host(workdir, &hostname)?;
 
     if cli.update {
         do_flake_update(&host_dir(workdir, &hostname))?;
@@ -177,45 +221,62 @@ fn run_darwin(workdir: &Path, cli: &Cli) -> anyhow::Result<()> {
     do_darwin_rebuild_switch(workdir, &hostname)?;
 
     if !cli.no_tag {
-        do_git_tag_and_push(workdir, &hostname)?;
+        tag_and_push(workdir, &hostname)
+            .context("system switch succeeded, but tagging or pushing the configuration failed")?;
     }
 
     Ok(())
 }
 
-/// Scans `<dir>/hosts/*` for the flake that exposes a non-empty
-/// `darwinConfigurations`, returning that directory name (== config name).
+/// Find the Darwin host flake.
 #[cfg(target_os = "macos")]
 fn resolve_darwin_hostname(dir: &Path) -> anyhow::Result<String> {
     let hosts_dir = dir.join("hosts");
     let mut found: Vec<String> = Vec::new();
 
-    for entry in std::fs::read_dir(&hosts_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    for entry in std::fs::read_dir(&hosts_dir)
+        .with_context(|| format!("failed to scan host directory {hosts_dir:?}"))?
+    {
+        let entry = entry.with_context(|| format!("failed to read an entry in {hosts_dir:?}"))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to read file type for {:?}", entry.path()))?
+            .is_dir()
+        {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !hosts_dir.join(&name).join("flake.nix").exists() {
+        let name = entry.file_name().into_string().map_err(|name| {
+            anyhow::anyhow!("host directory name {name:?} in {hosts_dir:?} is not valid UTF-8")
+        })?;
+        let flake = entry.path().join("flake.nix");
+        if !flake
+            .try_exists()
+            .with_context(|| format!("failed to access {flake:?}"))?
+        {
             continue;
         }
 
-        let output = Command::new("nix")
-            .arg("eval")
+        let mut cmd = Command::new("nix");
+        cmd.arg("eval")
             .arg(host_flake_ref(&name, "darwinConfigurations"))
             .arg("--apply")
             .arg("x: builtins.attrNames x")
-            .arg("--json")
-            .current_dir(dir)
-            .output()?;
+            .arg("--json");
+        let output = match capture_in_dir(&mut cmd, dir) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("Warning: could not inspect Darwin host {name:?}; skipping: {error:#}");
+                continue;
+            }
+        };
 
-        if !output.status.success() {
-            // Host flake without darwinConfigurations: skip.
-            continue;
-        }
-
-        let stdout = String::from_utf8(output.stdout)?;
-        let names: Vec<String> = serde_json::from_str(&stdout)?;
+        let names: Vec<String> = serde_json::from_slice(&output.stdout).with_context(|| {
+            format!(
+                "invalid darwinConfigurations JSON from {} in {dir:?}: {}",
+                command_text(&cmd),
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })?;
         if !names.is_empty() {
             found.push(name);
         }
@@ -223,53 +284,65 @@ fn resolve_darwin_hostname(dir: &Path) -> anyhow::Result<String> {
 
     match found.len() {
         0 => Err(anyhow::anyhow!(
-            "no darwinConfigurations found under hosts/*. Please specify --hostname."
+            "no darwinConfigurations found under {hosts_dir:?}; inspect any warnings above or specify --hostname <name>"
         )),
         1 => {
             println!("{}Auto-detected darwin host: {}{}", BLUE, found[0], NORMAL);
             Ok(found[0].clone())
         }
         _ => Err(anyhow::anyhow!(
-            "multiple darwin hosts found: {}. Please specify --hostname.",
+            "multiple Darwin hosts found under {hosts_dir:?}: {}. Specify --hostname <name>.",
             found.join(", ")
         )),
     }
 }
 
-/// Runs a command in the given directory and returns its exit status.
-fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
-    cmd.current_dir(dir);
-    let status = cmd.status()?;
-    Ok(status)
+fn command_text(cmd: &Command) -> String {
+    std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Runs a command in the given directory with stdout/stderr redirected to /dev/null.
-fn run_in_dir_capture(cmd: &mut Command, dir: &Path) -> anyhow::Result<ExitStatus> {
-    use std::process::Stdio;
-    let status = cmd
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    Ok(status)
+fn run_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<()> {
+    let command = command_text(cmd);
+    let status = cmd.current_dir(dir).status()
+        .with_context(|| format!("could not run {command} in {dir:?}; check the executable, PATH, and directory permissions"))?;
+    ensure!(
+        status.success(),
+        "command {command} failed in {dir:?} ({status}); see command output above"
+    );
+    Ok(())
+}
+
+fn capture_in_dir(cmd: &mut Command, dir: &Path) -> anyhow::Result<Output> {
+    let command = command_text(cmd);
+    let output = cmd.current_dir(dir).output()
+        .with_context(|| format!("could not run {command} in {dir:?}; check the executable, PATH, and directory permissions"))?;
+    ensure!(
+        output.status.success(),
+        "command {command} failed in {dir:?} ({})\nstderr: {}\nstdout: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim(),
+        String::from_utf8_lossy(&output.stdout).trim(),
+    );
+    Ok(output)
 }
 
 fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Result<()> {
-    let prev_branch = Command::new("git")
-        .arg("rev-parse")
-        .arg("--abbrev-ref")
-        .arg("HEAD")
-        .current_dir(dir)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let output = capture_in_dir(
+        Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]),
+        dir,
+    )
+    .context("failed to determine the current Git branch")?;
+    let prev_branch = String::from_utf8_lossy(&output.stdout);
+    let prev_branch = prev_branch.trim();
 
     let mut git_co = Command::new("git");
     git_co.arg("checkout").arg(branch);
-    let status = run_in_dir_capture(&mut git_co, dir)?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("git checkout failed: {}", status));
-    }
+    capture_in_dir(&mut git_co, dir)
+        .with_context(|| format!("failed to check out Git branch {branch:?}"))?;
 
     if prev_branch != branch {
         eprintln!(
@@ -280,45 +353,55 @@ fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Resu
     if !no_pull {
         let mut git_upstream = Command::new("git");
         git_upstream
-            .arg("rev-parse")
-            .arg("--abbrev-ref")
-            .arg("--symbolic-full-name")
-            .arg("@{u}");
-        let has_upstream = run_in_dir_capture(&mut git_upstream, dir)?.success();
-        if has_upstream {
+            .args(["for-each-ref", "--format=%(upstream)"])
+            .arg(format!("refs/heads/{branch}"));
+        let output = capture_in_dir(&mut git_upstream, dir)
+            .with_context(|| format!("failed to query upstream for branch {branch:?}"))?;
+        if !output.stdout.iter().all(u8::is_ascii_whitespace) {
             let mut git_pull = Command::new("git");
             git_pull.arg("pull");
-            let status = run_in_dir(&mut git_pull, dir)?;
-            if !status.success() {
-                return Err(anyhow::anyhow!("git pull failed: {}", status));
-            }
+            run_in_dir(&mut git_pull, dir)
+                .with_context(|| format!("failed to pull Git branch {branch:?}"))?;
+        } else {
+            eprintln!(
+                "Warning: branch {branch:?} has no upstream in {dir:?}; skipping git pull. Configure an upstream or use --no-pull."
+            );
         }
     }
     Ok(())
 }
 
-/// Directory of the per-host flake at `<workdir>/hosts/<name>`.
+/// Locate the host flake directory.
 fn host_dir(workdir: &Path, name: &str) -> std::path::PathBuf {
     workdir.join("hosts").join(name)
 }
 
-/// Flake reference into a per-host flake at `./hosts/<name>`.
-/// Process cwd stays at the repo root, so the relative path resolves there and
-/// git operations remain unaffected.
+fn check_host(workdir: &Path, name: &str) -> anyhow::Result<()> {
+    ensure!(
+        !name.is_empty() && Path::new(name).file_name() == Some(std::ffi::OsStr::new(name)),
+        "invalid host name {name:?}; expected one directory name under hosts/"
+    );
+    let flake = host_dir(workdir, name).join("flake.nix");
+    let metadata = std::fs::metadata(&flake)
+        .with_context(|| format!("cannot access host flake {flake:?} for host {name:?}; check the selected host and repository"))?;
+    ensure!(
+        metadata.is_file(),
+        "host flake {flake:?} is not a regular file"
+    );
+    Ok(())
+}
+
+/// Reference a host flake attribute.
 fn host_flake_ref(name: &str, attr: &str) -> String {
     format!("./hosts/{name}#{attr}")
 }
 
-/// Updates only the given host flake's lock file. The `--commit-lock-file`
-/// commit still lands in the single repo at the root.
+/// Update the selected host flake lock.
 fn do_flake_update(host_dir: &Path) -> anyhow::Result<()> {
     println!("{}Updating flakes...{}", BLUE, NORMAL);
     let mut cmd = Command::new("nix");
     cmd.arg("flake").arg("update").arg("--commit-lock-file");
-    let status = run_in_dir_capture(&mut cmd, host_dir)?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("nix flake update failed: {}", status));
-    }
+    capture_in_dir(&mut cmd, host_dir).context("failed to update the host flake lock")?;
     Ok(())
 }
 
@@ -326,10 +409,8 @@ fn do_nix_build(dir: &Path, name: &str, config_attr: &str) -> anyhow::Result<()>
     let target = format!("./hosts/{name}#{config_attr}.{name}.config.system.build.toplevel");
     let mut cmd = Command::new("nix");
     cmd.arg("build").arg("-L").arg(&target).arg("--show-trace");
-    let status = run_in_dir(&mut cmd, dir)?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("nix build failed: {}", status));
-    }
+    run_in_dir(&mut cmd, dir)
+        .with_context(|| format!("failed to build configuration {target:?}"))?;
     println!("{}Done!{}", BLUE, NORMAL);
     Ok(())
 }
@@ -348,10 +429,12 @@ fn do_nixos_rebuild_switch(
             .arg("--target-host")
             .arg(&r.target_host)
             .arg("--sudo");
-        let status = run_in_dir(&mut cmd, dir)?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("nixos-rebuild (remote) failed: {}", status));
-        }
+        run_in_dir(&mut cmd, dir).with_context(|| {
+            format!(
+                "failed to switch remote host {:?} to configuration {:?}",
+                r.target_host, r.remote_name
+            )
+        })?;
     } else {
         let mut sudo_cmd = Command::new("sudo");
         sudo_cmd
@@ -359,10 +442,9 @@ fn do_nixos_rebuild_switch(
             .arg("switch")
             .arg("--flake")
             .arg(host_flake_ref(native_hostname, native_hostname));
-        let status = run_in_dir(&mut sudo_cmd, dir)?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("nixos-rebuild failed: {}", status));
-        }
+        run_in_dir(&mut sudo_cmd, dir).with_context(|| {
+            format!("failed to switch local NixOS configuration {native_hostname:?}")
+        })?;
     }
     Ok(())
 }
@@ -374,61 +456,48 @@ fn do_darwin_rebuild_switch(dir: &Path, hostname: &str) -> anyhow::Result<()> {
         .arg("switch")
         .arg("--flake")
         .arg(host_flake_ref(hostname, hostname));
-    let status = run_in_dir(&mut cmd, dir)?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("darwin-rebuild failed: {}", status));
-    }
+    run_in_dir(&mut cmd, dir)
+        .with_context(|| format!("failed to switch Darwin configuration {hostname:?}"))?;
     Ok(())
 }
 
-fn check_git_clean(dir: &Path) -> anyhow::Result<()> {
-    let output = Command::new("git")
-        .arg("status")
-        .arg("--porcelain")
-        .current_dir(dir)
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!("git status check failed"));
-    }
-    if !output.stdout.is_empty() {
+fn check_repository(dir: &Path, require_clean: bool) -> anyhow::Result<()> {
+    let output = capture_in_dir(Command::new("git").args(["status", "--porcelain"]), dir)
+        .context("failed to inspect the Nix configuration Git working tree; check NIX_DOT_FILES (or the current directory if unset)")?;
+    if require_clean && !output.stdout.is_empty() {
         let dirty = String::from_utf8_lossy(&output.stdout);
         return Err(anyhow::anyhow!(
-            "Nix config repository is not clean:\n{}\nCommit or stash all changes before switching.",
+            "Nix configuration repository {dir:?} is not clean:\n{}\nCommit or stash all changes before switching.",
             dirty.trim()
         ));
     }
     Ok(())
 }
 
-fn do_git_tag_and_push(dir: &Path, config_name: &str) -> anyhow::Result<()> {
-    let date_out = Command::new("date").arg("+%Y-%m-%d-%H-%M").output()?;
-    if !date_out.status.success() {
-        return Err(anyhow::anyhow!("failed to get current date/time"));
-    }
-    let timestamp = String::from_utf8(date_out.stdout)?.trim().to_string();
+fn tag_and_push(dir: &Path, config_name: &str) -> anyhow::Result<()> {
+    let date_out = capture_in_dir(Command::new("date").arg("+%Y-%m-%d-%H-%M"), dir)
+        .context("failed to get the current date/time for the configuration tag")?;
+    let timestamp = String::from_utf8(date_out.stdout)
+        .context("date returned non-UTF-8 output for the configuration tag")?;
+    let timestamp = timestamp.trim();
+    ensure!(
+        !timestamp.is_empty(),
+        "date returned an empty timestamp for the configuration tag"
+    );
     let tag = format!("{}-{}", config_name, timestamp);
 
-    let status = Command::new("git")
-        .arg("tag")
-        .arg(&tag)
-        .current_dir(dir)
-        .status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("git tag failed: {}", status));
-    }
+    run_in_dir(Command::new("git").arg("tag").arg(&tag), dir)
+        .with_context(|| format!("failed to create local Git tag {tag:?}"))?;
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    let status = Command::new("git")
-        .arg("push")
-        .arg("origin")
-        .arg(&tag)
-        .current_dir(dir)
-        .status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("git push tag failed: {}", status));
-    }
+    run_in_dir(Command::new("git").args(["push", "origin", &tag]), dir)
+        .with_context(|| format!("local Git tag {tag:?} was created, but pushing to origin failed; from {dir:?}, retry: git push origin {}", shell_quote(&tag)))?;
 
     println!("{}Tagged and pushed: {}{}", BLUE, tag, NORMAL);
     Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

@@ -40,8 +40,36 @@ renewal --branch develop --no-pull
 
 Or build a release binary and install it into your PATH.
 
+## Zsh completion
+
+The Nix package installs zsh completion automatically. Enable completion in
+your shell with `autoload -Uz compinit && compinit` if it is not already enabled.
+
+For a manual installation, generate the script:
+
+```zsh
+mkdir -p ~/.zsh/completions
+renewal --completions zsh > ~/.zsh/completions/_renewal
+```
+
+Add these lines to `~/.zshrc`, placing the `fpath` line before any existing
+`compinit` call:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+Completion covers options and argument descriptions for the current platform;
+it does not query branches or hosts. Generating the script does not access
+`NIX_DOT_FILES` or run Git/Nix commands.
+
 ## Notes
 
 - The program reads the `NIX_DOT_FILES` environment variable to determine the repository directory. If unset, it defaults to the current working directory (`.`).
+- An empty or invalid `NIX_DOT_FILES` is an error. The directory must be a Git working tree, including with `--build-only`; only switching requires a clean working tree.
+- Errors include the operation, command, working directory, and underlying cause. Failed quiet commands include their captured output. A branch without an upstream skips pulling with a warning.
+- Darwin host detection reports failed evaluations and continues scanning. Use `--hostname <name>` to select a host explicitly.
+- If tagging or pushing fails after switching, the error reports that the switch already succeeded. A failed push leaves the local tag in place and prints a retry command.
 - This repository includes a `flake.nix` and `package.nix` for Nix builds; `package.nix` contains the `cargoHash` used by Nix.
 - The tool exits with a non-zero status on command failures.

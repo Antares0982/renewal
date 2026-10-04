@@ -11,5 +11,10 @@ rustPlatform.buildRustPackage rec {
     name = pname;
     path = ./.;
   };
-  cargoHash = "sha256-xxzczvHiBQ/NFaFeSJKzCBDDet2flkviwpePId+nb20=";
+  cargoHash = "sha256-fhZB0dlBdoLc1aY+R2R4BYr7pMNAeji9C7Rf9srAMs0=";
+  nativeBuildInputs = [ pkgs.installShellFiles ];
+  nativeCheckInputs = [ pkgs.git ];
+  postInstall = lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+    installShellCompletion --cmd renewal --zsh <($out/bin/renewal --completions zsh)
+  '';
 }
