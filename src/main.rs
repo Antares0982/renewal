@@ -1,7 +1,7 @@
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, ensure};
 use clap::{CommandFactory, Parser};
@@ -407,7 +407,15 @@ fn do_flake_update(host_dir: &Path) -> anyhow::Result<()> {
 
 fn do_nix_build(dir: &Path, name: &str, config_attr: &str) -> anyhow::Result<()> {
     let target = format!("./hosts/{name}#{config_attr}.{name}.config.system.build.toplevel");
-    let mut cmd = Command::new("nix");
+    let nom_available = Command::new("nom")
+        .arg("--version")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    let mut cmd = Command::new(if nom_available { "nom" } else { "nix" });
     cmd.arg("build").arg("-L").arg(&target).arg("--show-trace");
     run_in_dir(&mut cmd, dir)
         .with_context(|| format!("failed to build configuration {target:?}"))?;

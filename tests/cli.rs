@@ -185,6 +185,39 @@ fn cli_regression() {
         false,
         &["failed to build configuration", "nix-test-failure", "24"],
     );
+    let nom = bin.join("nom");
+    fs::write(
+        &nom,
+        format!(
+            "#!{}\nif [ \"$1\" = --version ]; then echo nom-probe; exit 0; fi\nprintf 'nom %s\\n' \"$*\" >> \"$TRACE\"\nexec nix \"$@\"\n",
+            shell.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&nom, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&trace, "").unwrap();
+    let output = run(&build, &[]);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("nom-probe"));
+    assert_output(output, true, &["Done!"]);
+    let commands = fs::read_to_string(&trace).unwrap();
+    let nix_build = commands
+        .lines()
+        .find(|line| line.starts_with("nix build "))
+        .unwrap();
+    assert!(commands.contains(&nix_build.replacen("nix", "nom", 1)));
+    assert_output(
+        run(&build, &[("FAIL_NIX", "build".as_ref())]),
+        false,
+        &["failed to build configuration", "nix-test-failure", "24"],
+    );
+    for mode in [0o644, 0o755] {
+        fs::write(&nom, format!("#!{}\nexit 1\n", shell.trim())).unwrap();
+        fs::set_permissions(&nom, fs::Permissions::from_mode(mode)).unwrap();
+        fs::write(&trace, "").unwrap();
+        assert_output(run(&build, &[]), true, &["Done!"]);
+        assert!(fs::read_to_string(&trace).unwrap().contains("nix build "));
+    }
+    fs::remove_file(nom).unwrap();
     assert_output(
         run(&host_args, &[("FAIL_GIT", "push".as_ref())]),
         false,

@@ -10,6 +10,7 @@ target `./hosts/<name>`.
 
 ## Features
 
+- Automatically use `nom build` when `nom --version` succeeds, letting nix-output-monitor handle the JSON log pipeline and preserve build failures; otherwise use `nix build`.
 - `-u, --update` — update the target host's flake lock (runs `git checkout <branch>`, `git pull`, then `nix flake update --commit-lock-file` inside `hosts/<name>`) before building.
 - `-b, --build-only` — perform `nix build` only and do not run `nixos-rebuild switch`.
 - `--remote target_host:remote_name` — use `remote_name` as the profile name and run a remote rebuild with:
