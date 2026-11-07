@@ -359,7 +359,7 @@ fn do_git_checkout_pull(dir: &Path, branch: &str, no_pull: bool) -> anyhow::Resu
             .with_context(|| format!("failed to query upstream for branch {branch:?}"))?;
         if !output.stdout.iter().all(u8::is_ascii_whitespace) {
             let mut git_pull = Command::new("git");
-            git_pull.arg("pull");
+            git_pull.args(["pull", "--ff-only"]);
             run_in_dir(&mut git_pull, dir)
                 .with_context(|| format!("failed to pull Git branch {branch:?}"))?;
         } else {
