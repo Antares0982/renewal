@@ -65,8 +65,30 @@ fn cli_regression() {
         );
     }
     for (name, body) in [
-        ("git", format!("printf 'git %s\\n' \"$*\" >> \"$TRACE\"\nif [ \"$1\" = \"${{FAIL_GIT-}}\" ]; then echo git-test-failure >&2; exit 23; fi\nexec '{git}' \"$@\"")),
-        ("nix", "printf 'nix %s\\n' \"$*\" >> \"$TRACE\"\nif [ \"$1\" = \"${FAIL_NIX-}\" ]; then echo nix-test-failure >&2; exit 24; fi".into()),
+        (
+            "git",
+            format!(
+                "printf 'git %s\\n' \"$*\" >> \"$TRACE\"\nif [ \"$1\" = \"${{FAIL_GIT-}}\" ]; then echo git-test-failure >&2; exit 23; fi\nexec '{git}' \"$@\""
+            ),
+        ),
+        (
+            "nix",
+            r#"printf 'nix %s\n' "$*" >> "$TRACE"
+if [ "$1" = "${FAIL_NIX-}" ]; then echo nix-test-failure >&2; exit 24; fi
+if [ "$1" = eval ]; then
+    [ "$2" = --impure ] && [ "$3" = --expr ] &&
+    [ "$4" = 'builtins.getFlake (builtins.getEnv "RENEWAL_HOST_FLAKE")' ] &&
+    [ "$5" = --apply ] &&
+    [ "$6" = 'flake: builtins.attrNames (flake.darwinConfigurations or {})' ] &&
+    [ "$7" = --json ] || exit 25
+    case "$RENEWAL_HOST_FLAKE" in
+        */hosts/example) echo '["example"]' ;;
+        */hosts/linux) echo '[]' ;;
+        *) echo invalid-flake >&2; exit 26 ;;
+    esac
+fi"#
+            .into(),
+        ),
         ("nixos-rebuild", "exit 0".into()),
         ("sudo", "exit 0".into()),
         ("date", "echo 2026-10-05-12-00".into()),
@@ -144,6 +166,42 @@ fn cli_regression() {
     #[cfg(target_os = "macos")]
     let host_args = ["--hostname", "example"];
     let build = [&host_args[..], &["--build-only"]].concat();
+    #[cfg(target_os = "macos")]
+    {
+        let linux = repo.join("hosts/linux");
+        fs::create_dir(&linux).unwrap();
+        fs::write(linux.join("flake.nix"), "{}\n").unwrap();
+        let detect = ["--build-only", "--no-pull"];
+        let output = run(&detect, &[]);
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_output(output, true, &["Auto-detected darwin host: example"]);
+        assert_output(
+            run(&detect, &[("FAIL_NIX", "eval".as_ref())]),
+            false,
+            &[
+                "could not inspect Darwin host",
+                "nix-test-failure",
+                "no darwinConfigurations found",
+            ],
+        );
+        let broken = repo.join("hosts/broken");
+        fs::create_dir(&broken).unwrap();
+        fs::write(broken.join("flake.nix"), "broken\n").unwrap();
+        assert_output(
+            run(&detect, &[]),
+            true,
+            &[
+                "could not inspect Darwin host \"broken\"",
+                "invalid-flake",
+                "Auto-detected darwin host: example",
+            ],
+        );
+        let output = run(&build, &[]);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("could not inspect Darwin host"));
+        assert_output(output, true, &["Done!"]);
+        fs::remove_dir_all(broken).unwrap();
+        fs::remove_dir_all(linux).unwrap();
+    }
     assert_output(
         run(&build, &[]),
         true,

@@ -70,7 +70,7 @@ it does not query branches or hosts. Generating the script does not access
 - The program reads the `NIX_DOT_FILES` environment variable to determine the repository directory. If unset, it defaults to the current working directory (`.`).
 - An empty or invalid `NIX_DOT_FILES` is an error. The directory must be a Git working tree, including with `--build-only`; only switching requires a clean working tree.
 - Errors include the operation, command, working directory, and underlying cause. Failed quiet commands include their captured output. A branch without an upstream skips pulling with a warning.
-- Darwin host detection reports failed evaluations and continues scanning. Use `--hostname <name>` to select a host explicitly.
+- Darwin host detection silently skips flakes with missing or empty `darwinConfigurations`; evaluation failures still produce warnings. Use `--hostname <name>` to select a host explicitly and skip scanning.
 - If tagging or pushing fails after switching, the error reports that the switch already succeeded. A failed push leaves the local tag in place and prints a retry command.
 - This repository includes a `flake.nix` and `package.nix` for Nix builds; `package.nix` contains the `cargoHash` used by Nix.
 - The tool exits with a non-zero status on command failures.

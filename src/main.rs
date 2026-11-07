@@ -258,10 +258,13 @@ fn resolve_darwin_hostname(dir: &Path) -> anyhow::Result<String> {
 
         let mut cmd = Command::new("nix");
         cmd.arg("eval")
-            .arg(host_flake_ref(&name, "darwinConfigurations"))
+            .arg("--impure")
+            .arg("--expr")
+            .arg("builtins.getFlake (builtins.getEnv \"RENEWAL_HOST_FLAKE\")")
             .arg("--apply")
-            .arg("x: builtins.attrNames x")
-            .arg("--json");
+            .arg("flake: builtins.attrNames (flake.darwinConfigurations or {})")
+            .arg("--json")
+            .env("RENEWAL_HOST_FLAKE", entry.path());
         let output = match capture_in_dir(&mut cmd, dir) {
             Ok(output) => output,
             Err(error) => {
