@@ -447,13 +447,12 @@ fn do_nixos_rebuild_switch(
             )
         })?;
     } else {
-        let mut sudo_cmd = Command::new("sudo");
-        sudo_cmd
-            .arg("nixos-rebuild")
-            .arg("switch")
+        let mut cmd = Command::new("nixos-rebuild");
+        cmd.arg("switch")
             .arg("--flake")
-            .arg(host_flake_ref(native_hostname, native_hostname));
-        run_in_dir(&mut sudo_cmd, dir).with_context(|| {
+            .arg(host_flake_ref(native_hostname, native_hostname))
+            .arg("--sudo");
+        run_in_dir(&mut cmd, dir).with_context(|| {
             format!("failed to switch local NixOS configuration {native_hostname:?}")
         })?;
     }

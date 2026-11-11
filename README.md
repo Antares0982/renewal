@@ -23,7 +23,13 @@ When no flags are given the tool will:
 
 1. run `git checkout master` and `git pull` in the `NIX_DOT_FILES` directory (or `.` if unset);
 2. run `nix build ./hosts/$HOSTNAME#nixosConfigurations.$HOSTNAME.config.system.build.toplevel --show-trace`;
-3. run `sudo nixos-rebuild switch --flake ./hosts/$HOSTNAME#$HOSTNAME`.
+3. run `nixos-rebuild switch --flake ./hosts/$HOSTNAME#$HOSTNAME --sudo`.
+
+On Linux, evaluation and building run as the current user; `nixos-rebuild`
+uses sudo only for privileged deployment steps. This requires a version of
+`nixos-rebuild` that supports `--sudo` (such as the NixOS 25.11 implementations).
+Sudo rules must allow the deployment commands invoked by `nixos-rebuild`;
+an allowance for only `sudo nixos-rebuild` is insufficient.
 
 ## Usage
 
