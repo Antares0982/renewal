@@ -89,8 +89,16 @@ if [ "$1" = eval ]; then
 fi"#
             .into(),
         ),
-        ("nixos-rebuild", "exit 0".into()),
-        ("sudo", "exit 0".into()),
+        (
+            "nixos-rebuild",
+            r#"printf 'nixos-rebuild %s\n' "$*" >> "$TRACE"
+if [ "${FAIL_REBUILD-}" = 1 ]; then echo rebuild-test-failure >&2; exit 27; fi"#
+                .into(),
+        ),
+        (
+            "sudo",
+            "printf 'sudo %s\\n' \"$*\" >> \"$TRACE\"\nexit 0".into(),
+        ),
         ("date", "echo 2026-10-05-12-00".into()),
     ] {
         let path = bin.join(name);
@@ -107,7 +115,8 @@ fi"#
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env_remove("FAIL_GIT")
-            .env_remove("FAIL_NIX");
+            .env_remove("FAIL_NIX")
+            .env_remove("FAIL_REBUILD");
         for (key, value) in vars {
             cmd.env(key, value);
         }
@@ -276,6 +285,71 @@ fi"#
         assert!(fs::read_to_string(&trace).unwrap().contains("nix build "));
     }
     fs::remove_file(nom).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let hostname = hostname::get().unwrap().into_string().unwrap();
+        let local_host = repo.join("hosts").join(&hostname);
+        fs::create_dir_all(&local_host).unwrap();
+        fs::write(local_host.join("flake.nix"), "{}\n").unwrap();
+        assert_output(
+            Command::new(git)
+                .args(["add", "hosts"])
+                .current_dir(&repo)
+                .output()
+                .unwrap(),
+            true,
+            &[],
+        );
+        assert_output(
+            Command::new(git)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "Add local host",
+                ])
+                .current_dir(&repo)
+                .output()
+                .unwrap(),
+            true,
+            &[],
+        );
+        for (args, expected) in [
+            (
+                vec!["--no-tag"],
+                format!("nixos-rebuild switch --flake ./hosts/{hostname}#{hostname} --sudo"),
+            ),
+            (
+                vec!["--remote", "user@example:example", "--no-tag"],
+                "nixos-rebuild switch --flake ./hosts/example#example --target-host user@example --sudo".into(),
+            ),
+        ] {
+            fs::write(&trace, "").unwrap();
+            assert_output(run(&args, &[]), true, &[]);
+            let commands = fs::read_to_string(&trace).unwrap();
+            assert!(commands.lines().any(|line| line == expected), "{commands}");
+            assert!(!commands.lines().any(|line| line.starts_with("sudo ")), "{commands}");
+        }
+        fs::write(&trace, "").unwrap();
+        assert_output(
+            run(&[], &[("FAIL_REBUILD", "1".as_ref())]),
+            false,
+            &["failed to switch local NixOS configuration", "27"],
+        );
+        let commands = fs::read_to_string(&trace).unwrap();
+        assert!(
+            !commands.lines().any(|line| line.starts_with("sudo ")
+                || line.starts_with("git tag ")
+                || line.starts_with("git push ")),
+            "{commands}"
+        );
+    }
     assert_output(
         run(&host_args, &[("FAIL_GIT", "push".as_ref())]),
         false,
